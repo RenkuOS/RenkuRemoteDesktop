@@ -7,10 +7,13 @@
 
 
 #include <atomic>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "ByteStream.h"
+#include "ClipboardChannel.h"
+#include "DynamicChannels.h"
 #include "Capabilities.h"
 #include "Mcs.h"
 #include "Platform.h"
@@ -38,6 +41,11 @@ struct ServerConfig {
 	bool		allowWithoutPassword;
 
 	ResizePolicy resize;
+	// "log_level" in the settings: error, warning, info, debug, or trace.
+	// Empty keeps the default (info, or what -v asks for).
+	std::string	logLevel;
+	// Copies of files from the client larger than this are refused.
+	uint32_t	incomingFilesLimitMB;
 	int			frameIntervalMs;
 	uint16_t	port;
 	std::string	bindAddress;
@@ -61,11 +69,12 @@ public:
 };
 
 
-class Session {
+class Session : private DisplaySizeRequester {
 public:
 							Session(int fd, const ServerConfig& config,
 								TlsContext& tls, FrameSource& frames,
-								InputSink& input, SessionHost& host);
+								InputSink& input, Clipboard& clipboard,
+								SessionHost& host);
 							~Session();
 
 			// Runs the connection to its end, on the calling thread.
@@ -124,6 +133,14 @@ private:
 								const std::vector<uint8_t>& data);
 
 			bool			_SendFrame();
+			// Static virtual channels ([MS-RDPBCGR] 2.2.6.1, 3.1.5.2).
+			const ClientChannel* _FindChannel(const char* name) const;
+			bool			_ReceiveChannelData(uint16_t channel,
+								Reader& payload);
+			bool			_SendChannelData(const ClientChannel& channel,
+								const Bytes& data);
+			void			_StartChannels();
+	virtual	void			ClientSizeChanged(int32_t width, int32_t height);
 			bool			_SendPointerShape();
 			bool			_EncodeRect(int x, int y, int width, int height,
 								std::vector<uint8_t>& out);
@@ -136,6 +153,7 @@ private:
 			TlsContext&		fTls;
 			FrameSource&	fFrames;
 			InputSink&		fInput;
+			Clipboard&		fClipboard;
 			SessionHost&	fHost;
 			Transport*		fTransport;
 
@@ -174,6 +192,31 @@ private:
 			std::vector<uint8_t> fTileMask;
 			uint32_t		fPointerGeneration;
 			std::vector<uint8_t> fScratch;
+
+			// Chunks of a channel message being reassembled, by channel ID.
+			struct ChannelBuffer {
+				Bytes		data;
+				uint32_t	total;
+			};
+			std::map<uint16_t, ChannelBuffer> fChannelBuffers;
+
+			class StaticChannelSender : public ChannelSender {
+			public:
+								StaticChannelSender(Session& session)
+									: fSession(session), fChannel(NULL) {}
+				virtual	bool	SendChannelData(const Bytes& data)
+									{ return fChannel != NULL
+										&& fSession._SendChannelData(
+											*fChannel, data); }
+				Session&		fSession;
+				const ClientChannel* fChannel;
+			};
+			StaticChannelSender fClipboardSender;
+			ClipboardChannel fClipboardChannel;
+			StaticChannelSender fDynamicSender;
+			DynamicChannels	fDynamicChannels;
+			DisplayControl	fDisplayControl;
+			bool			fChannelsStarted;
 
 			std::atomic<bool> fKicked;
 			std::atomic<bool> fAborted;

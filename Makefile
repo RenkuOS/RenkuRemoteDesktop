@@ -18,9 +18,11 @@ CXXFLAGS += -std=c++17 -Wall -Wextra -Wno-unused-parameter -Isrc/core -MMD -MP
 CORE_SOURCES := \
 	src/core/Auth.cpp \
 	src/core/Capabilities.cpp \
+	src/core/ClipboardChannel.cpp \
 	src/core/CredSsp.cpp \
 	src/core/Crypto.cpp \
 	src/core/Der.cpp \
+	src/core/DynamicChannels.cpp \
 	src/core/Log.cpp \
 	src/core/Mcs.cpp \
 	src/core/Ntlm.cpp \
@@ -38,7 +40,7 @@ ifeq ($(UNAME),Haiku)
 LIBS := -lssl -lcrypto -lnetwork -lbe
 SERVER := $(BUILD)/RenkuRemoteDesktop
 SERVER_SOURCES := src/haiku/HaikuMain.cpp src/haiku/ScreenFrameSource.cpp \
-	src/haiku/ObserverFrameSource.cpp \
+	src/haiku/ObserverFrameSource.cpp src/haiku/HaikuClipboard.cpp \
 	src/haiku/PortInputSink.cpp
 SERVER_RSRC := $(BUILD)/src/haiku/RenkuRemoteDesktop.rsrc
 ADDON := $(BUILD)/RenkuRemoteDesktopInput

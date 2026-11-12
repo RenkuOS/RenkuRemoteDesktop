@@ -25,7 +25,7 @@ class Server : public SessionHost {
 public:
 								Server(const ServerConfig& config,
 									TlsContext& tls, FrameSource& frames,
-									InputSink& input);
+									InputSink& input, Clipboard& clipboard);
 	virtual						~Server();
 
 			bool				Listen();
@@ -68,6 +68,7 @@ private:
 			TlsContext&			fTls;
 			FrameSource&		fFrames;
 			InputSink&			fInput;
+			Clipboard&			fClipboard;
 			int					fListenFd;
 			std::atomic<bool>	fStopping;
 

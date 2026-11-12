@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include <mutex>
@@ -132,6 +133,11 @@ public:
 		fBoxX = -1;
 	}
 
+	virtual DisplaySize OriginalSize()
+	{
+		return fConsole;
+	}
+
 private:
 	static const int kBox = 96;
 
@@ -222,6 +228,112 @@ public:
 };
 
 
+// A clipboard in two files in the harness directory: changing
+// clipboard-local.txt is a local copy; text from the client is written to
+// clipboard-from-client.txt.
+class FileClipboard : public Clipboard {
+public:
+	FileClipboard(const std::string& directory)
+		:
+		fLocalPath(directory + "/clipboard-local.txt"),
+		fClientPath(directory + "/clipboard-from-client.txt"),
+		fFilesPath(directory + "/clipboard-files.txt"),
+		fIncoming(directory + "/incoming"),
+		fGeneration(0),
+		fLastChange(0)
+	{
+		fLastChange = _ChangeTime(fLocalPath) + _ChangeTime(fFilesPath);
+	}
+
+	virtual uint32_t Generation()
+	{
+		std::lock_guard<std::mutex> lock(fLock);
+		int64_t change = _ChangeTime(fLocalPath) + _ChangeTime(fFilesPath);
+		if (change != fLastChange) {
+			fLastChange = change;
+			fGeneration++;
+		}
+		return fGeneration;
+	}
+
+	virtual bool GetText(std::string& text)
+	{
+		FILE* file = fopen(fLocalPath.c_str(), "rb");
+		if (file == NULL)
+			return false;
+		text.clear();
+		char buffer[4096];
+		size_t size;
+		while ((size = fread(buffer, 1, sizeof(buffer), file)) > 0)
+			text.append(buffer, size);
+		fclose(file);
+		return true;
+	}
+
+	// clipboard-files.txt lists local paths, one per line; when it exists
+	// it is the clipboard instead of the text.
+	virtual bool GetFiles(std::vector<std::string>& paths)
+	{
+		paths.clear();
+		FILE* file = fopen(fFilesPath.c_str(), "r");
+		if (file == NULL)
+			return false;
+		char line[4096];
+		while (fgets(line, sizeof(line), file) != NULL) {
+			size_t length = strcspn(line, "\r\n");
+			if (length > 0)
+				paths.push_back(std::string(line, length));
+		}
+		fclose(file);
+		return !paths.empty();
+	}
+
+	virtual void SetFiles(const std::vector<std::string>& paths)
+	{
+		for (size_t i = 0; i < paths.size(); i++)
+			LOG_I("clipboard: files from the client: %s", paths[i].c_str());
+	}
+
+	virtual std::string IncomingFilesFolder()
+	{
+		return fIncoming;
+	}
+
+	virtual void Notify(const std::string& message)
+	{
+		LOG_I("notification: %s", message.c_str());
+	}
+
+	virtual void SetText(const std::string& text)
+	{
+		LOG_I("clipboard from the client: %zu bytes", text.size());
+		FILE* file = fopen(fClientPath.c_str(), "wb");
+		if (file != NULL) {
+			fwrite(text.data(), 1, text.size(), file);
+			fclose(file);
+		}
+	}
+
+private:
+	int64_t _ChangeTime(const std::string& path)
+	{
+		struct stat info;
+		if (stat(path.c_str(), &info) != 0)
+			return 0;
+		return (int64_t)info.st_mtim.tv_sec * 1000000000LL
+			+ info.st_mtim.tv_nsec + info.st_size;
+	}
+
+	std::mutex	fLock;
+	std::string	fLocalPath;
+	std::string	fClientPath;
+	std::string	fFilesPath;
+	std::string	fIncoming;
+	uint32_t	fGeneration;
+	int64_t		fLastChange;
+};
+
+
 static Server* sServer;
 
 
@@ -280,7 +392,8 @@ main(int argc, char** argv)
 
 	TestFrames frames;
 	LoggingInput input;
-	Server server(config, tls, frames, input);
+	FileClipboard clipboard(directory);
+	Server server(config, tls, frames, input, clipboard);
 	if (!server.Listen())
 		return 1;
 

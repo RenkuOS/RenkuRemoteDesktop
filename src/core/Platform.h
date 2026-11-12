@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 
+#include <string>
 #include <vector>
 
 
@@ -86,6 +87,40 @@ public:
 									{ (void)size; return false; }
 	// Undoes SetSize() when the last client leaves.
 	virtual	void				RestoreSize() {}
+	// The size before any SetSize(): the console's own.
+	virtual	DisplaySize			OriginalSize() { return Size(); }
+};
+
+
+// The local system clipboard, for the clipboard channel. Text is UTF-8 with
+// "\n" line ends.
+class Clipboard {
+public:
+	virtual						~Clipboard() {}
+
+	// Changes whenever the local clipboard changes, except through
+	// SetText(). The clipboard channel compares it to notice local copies.
+	virtual	uint32_t			Generation() = 0;
+	// The text on the clipboard; false when it holds no text.
+	virtual	bool				GetText(std::string& text) = 0;
+	// Puts text from the client on the clipboard.
+	virtual	void				SetText(const std::string& text) = 0;
+
+	// Files and folders on the clipboard (copied in Tracker), as absolute
+	// paths; false when it holds none.
+	virtual	bool				GetFiles(std::vector<std::string>& paths)
+									{ (void)paths; return false; }
+	// Puts files and folders from the client on the clipboard, as copied.
+	// Does not change Generation().
+	virtual	void				SetFiles(const std::vector<std::string>& paths)
+									{ (void)paths; }
+	// The folder that files from the client are copied into, or "" when
+	// file copies are not supported.
+	virtual	std::string			IncomingFilesFolder()
+									{ return std::string(); }
+	// Tells the user something about a file copy.
+	virtual	void				Notify(const std::string& message)
+									{ (void)message; }
 };
 
 

@@ -36,6 +36,11 @@ ChooseSessionSize(ResizePolicy policy, const DisplaySize& client,
 		return false;
 
 	bool fastest = policy == RESIZE_FASTEST;
+	// "Fastest" never switches away from a console that fits the client.
+	if (fastest && console.width <= client.width
+		&& console.height <= client.height) {
+		return false;
+	}
 
 	// An exact match first.
 	for (size_t i = 0; i < available.size(); i++) {

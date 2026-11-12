@@ -245,3 +245,32 @@ the panel, whenever a client sent no separate move before a click.
 
 Replacing the input add-on file while input_server runs unloaded the old one
 without loading the new one; restarting input_server fixed that.
+
+## 2026-11-12, clipboard and dynamic resize
+
+### Results
+
+| Test | Result |
+|---|---|
+| Unit tests: clipboard text conversion and format lists, the channel in both directions, file lists (including sizes above 4 GB), unsafe names, folder walking, a 1.5 MB download in pieces, serving a range, the size limit, a skipped name keeping list positions, a file without a size stopped at the limit; dynamic channel capabilities, creation, fragmentation both ways, and a monitor layout | 146 of 146 pass, on Linux and on RenkuOS |
+| Text, client to server (FreeRDP 3.32 `+clipboard`, Linux harness): UTF-8 and line ends | Pass |
+| Text, server to client | Pass |
+| 234,398 bytes of text, both ways | Pass: identical |
+| Files, client to server: a folder with a subfolder and a 3 MB file | Pass: identical, in a new timestamped folder |
+| Files, server to client, FreeRDP on Linux | **Not working with FreeRDP**: it receives the list but its FUSE view returns nothing. To be tested with mstsc and Windows Explorer |
+| Dynamic resize (FreeRDP `/dynamic-resolution`, `resize = match-client`): 1280×800 to 1024×768 to 1600×900 | Pass: display switched and the client reactivated, picture correct |
+| Text, client to server, Supermicro Test Desktop (FreeRDP) | Pass: `clipboard -p` shows the text with its Unicode |
+| Text, server to client, Supermicro Test Desktop (`clipboard -c`) | Pass |
+| Files, client to server, Supermicro Test Desktop | Pass: in `~/Desktop/Remote files/<date time>/`, `photo.bin` identical (MD5); the clipboard holds Tracker's `r<device>_<node>` refs with `'Tcsl'` (copy) modes |
+| Text with Windows 11 mstsc, several copies in a row | First version: some copies were never fetched. mstsc answered the immediate request with "fail" (log: PDU 0x0005, flags 0x2), so RenkuOS kept the older text. Fixed: a refused request is repeated after 250, 500, and 1000 ms. Retest: **pass**, every paste was the latest copy (4 texts fetched, 2 of them after a retry) |
+| Paste in Tracker, files and resize with mstsc | **Not tested yet** |
+
+Review of the dynamic channels found two more problems, both fixed with
+tests: a message of 1,591 to 1,593 bytes read past its buffer, and under
+"fastest" a client window larger than the console could still shrink it.
+
+Code review found two blockers in the file copy from the client, both fixed
+with regression tests: the size limit could be passed with a file that
+gives no size, with sizes that wrap the total, or with oversized pieces; and
+a skipped file name shifted the list positions, so later files got another
+file's contents.

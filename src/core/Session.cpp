@@ -73,6 +73,7 @@ ServerConfig::ServerConfig()
 	:
 	allowWithoutPassword(false),
 	resize(RESIZE_FASTEST),
+	incomingFilesLimitMB(500),
 	frameIntervalMs(40),
 	port(3389)
 {
@@ -80,13 +81,15 @@ ServerConfig::ServerConfig()
 
 
 Session::Session(int fd, const ServerConfig& config, TlsContext& tls,
-	FrameSource& frames, InputSink& input, SessionHost& host)
+	FrameSource& frames, InputSink& input, Clipboard& clipboard,
+	SessionHost& host)
 	:
 	fFd(fd),
 	fConfig(config),
 	fTls(tls),
 	fFrames(frames),
 	fInput(input),
+	fClipboard(clipboard),
 	fHost(host),
 	fTransport(new Transport(fd)),
 	fRequestedProtocols(0),
@@ -110,6 +113,13 @@ Session::Session(int fd, const ServerConfig& config, TlsContext& tls,
 	fBytesSent(0),
 	fFrameStale(true),
 	fPointerGeneration(kNoPointer),
+	fClipboardSender(*this),
+	fClipboardChannel(fClipboardSender, clipboard,
+		(uint64_t)config.incomingFilesLimitMB * 1024 * 1024),
+	fDynamicSender(*this),
+	fDynamicChannels(fDynamicSender),
+	fDisplayControl(*this),
+	fChannelsStarted(false),
 	fKicked(false),
 	fAborted(false),
 	fKickReason(0)
@@ -168,6 +178,9 @@ Session::Run()
 		fInput.ReleaseAll();
 		fFrames.RestoreSize();
 	}
+	// While the server still waits for this session: a copy in progress
+	// tells the user it stopped.
+	fClipboardChannel.Stop();
 	fHost.SessionEnded(this);
 	LOG_I("connection from %s ended", Peer().c_str());
 }
@@ -743,6 +756,9 @@ Session::_MainLoop()
 			continue;
 		}
 
+		if (fActive && !fClipboardChannel.Poll())
+			return;
+
 		if (fActive && !fOutputSuppressed && NowMs() >= nextFrame) {
 			if (!_SendFrame())
 				return;
@@ -794,11 +810,8 @@ Session::_HandleSlowPath(Pdu& pdu)
 	Reader payload(NULL, 0);
 	if (!_ReadMcsSendData(reader, channel, payload))
 		return false;
-	if (channel != MCS_IO_CHANNEL_ID) {
-		LOG_T("ignoring %zu bytes on channel %u", payload.Remaining(),
-			channel);
-		return true;
-	}
+	if (channel != MCS_IO_CHANNEL_ID)
+		return _ReceiveChannelData(channel, payload);
 
 	// Share Control Header (2.2.8.1.1.1.1)
 	uint16_t totalLength = payload.U16LE();
@@ -890,6 +903,7 @@ Session::_HandleShareData(Reader& reader)
 			}
 
 			fActive = true;
+			_StartChannels();
 			fFullRefresh = true;
 			fPointerGeneration = kNoPointer;
 			LOG_I("session active at %dx%d", fSize.width, fSize.height);
@@ -1257,6 +1271,175 @@ Session::_FlushBitmaps(Writer& rects, uint16_t& count)
 	rects.Data().clear();
 	count = 0;
 	return _SendFastPathUpdate(FASTPATH_UPDATETYPE_BITMAP, data);
+}
+
+
+// #pragma mark - static virtual channels
+
+
+// A channel message larger than this is dropped. Clipboard text is capped
+// lower; file data comes in requested pieces.
+static const uint32_t kMaxChannelMessage = 32 * 1024 * 1024;
+// CHANNEL_PDU_HEADER flags (2.2.6.1.1)
+static const uint32_t CHANNEL_FLAG_FIRST = 0x01;
+static const uint32_t CHANNEL_FLAG_LAST = 0x02;
+static const uint32_t CHANNEL_FLAG_SHOW_PROTOCOL = 0x10;
+static const uint32_t CHANNEL_PACKET_COMPRESSED = 0x00200000;
+// CHANNEL_DEF options (2.2.1.3.4.1)
+static const uint32_t CHANNEL_OPTION_SHOW_PROTOCOL = 0x00200000;
+// Without a VCChunkSize in our Virtual Channel Capability Set, chunks are
+// at most this long in both directions (2.2.6.1).
+static const size_t CHANNEL_CHUNK_LENGTH = 1600;
+
+
+const ClientChannel*
+Session::_FindChannel(const char* name) const
+{
+	for (size_t i = 0; i < fClient.channels.size(); i++) {
+		if (strcmp(fClient.channels[i].name, name) == 0)
+			return &fClient.channels[i];
+	}
+	return NULL;
+}
+
+
+void
+Session::_StartChannels()
+{
+	if (fChannelsStarted)
+		return;
+	fChannelsStarted = true;
+
+	fClipboardSender.fChannel = _FindChannel("cliprdr");
+	if (fClipboardSender.fChannel != NULL) {
+		LOG_D("clipboard channel %u", fClipboardSender.fChannel->id);
+		fClipboardChannel.Start();
+	}
+
+	fDynamicSender.fChannel = _FindChannel("drdynvc");
+	if (fDynamicSender.fChannel != NULL) {
+		LOG_D("dynamic channel transport on %u", fDynamicSender.fChannel->id);
+		fDynamicChannels.Add(DisplayControl::Name(), &fDisplayControl);
+		fDynamicChannels.Start();
+	}
+}
+
+
+bool
+Session::_ReceiveChannelData(uint16_t channel, Reader& payload)
+{
+	// CHANNEL_PDU_HEADER, then a chunk of the message.
+	uint32_t total = payload.U32LE();
+	uint32_t flags = payload.U32LE();
+	if (!payload.Ok())
+		return true;
+	if ((flags & CHANNEL_PACKET_COMPRESSED) != 0) {
+		// We offer no virtual channel compression (VCCAPS_NO_COMPR).
+		LOG_W("compressed data on channel %u; ignored", channel);
+		return true;
+	}
+
+	ChannelBuffer& buffer = fChannelBuffers[channel];
+	if ((flags & CHANNEL_FLAG_FIRST) != 0) {
+		buffer.data.clear();
+		buffer.total = total;
+	}
+	if (buffer.total > kMaxChannelMessage
+		|| buffer.data.size() + payload.Remaining() > buffer.total) {
+		LOG_W("channel %u: message larger than announced or too large; "
+			"dropped", channel);
+		buffer.data.clear();
+		buffer.total = 0;
+		return true;
+	}
+	buffer.data.insert(buffer.data.end(), payload.Current(),
+		payload.Current() + payload.Remaining());
+	if ((flags & CHANNEL_FLAG_LAST) == 0)
+		return true;
+
+	Bytes message;
+	message.swap(buffer.data);
+	buffer.total = 0;
+
+	if (fClipboardSender.fChannel != NULL
+		&& channel == fClipboardSender.fChannel->id) {
+		return fClipboardChannel.Receive(message);
+	}
+	if (fDynamicSender.fChannel != NULL
+		&& channel == fDynamicSender.fChannel->id) {
+		return fDynamicChannels.Receive(message);
+	}
+	LOG_T("ignoring %zu bytes on channel %u", message.size(), channel);
+	return true;
+}
+
+
+bool
+Session::_SendChannelData(const ClientChannel& channel, const Bytes& data)
+{
+	uint32_t showProtocol
+		= (channel.options & CHANNEL_OPTION_SHOW_PROTOCOL) != 0
+			? CHANNEL_FLAG_SHOW_PROTOCOL : 0;
+	size_t offset = 0;
+	do {
+		size_t size = data.size() - offset;
+		if (size > CHANNEL_CHUNK_LENGTH)
+			size = CHANNEL_CHUNK_LENGTH;
+		uint32_t flags = showProtocol;
+		if (offset == 0)
+			flags |= CHANNEL_FLAG_FIRST;
+		if (offset + size == data.size())
+			flags |= CHANNEL_FLAG_LAST;
+
+		Writer chunk;
+		chunk.U32LE((uint32_t)data.size());
+		chunk.U32LE(flags);
+		chunk.Bytes(data.data() + offset, size);
+
+		Writer mcs;
+		WriteSendDataIndication(mcs, channel.id, chunk.Data().data(),
+			chunk.Data().size());
+		if (!fTransport->WriteAll(WrapX224Data(mcs.Data())))
+			return false;
+		fBytesSent += mcs.Data().size();
+		offset += size;
+	} while (offset < data.size());
+	return true;
+}
+
+
+void
+Session::ClientSizeChanged(int32_t width, int32_t height)
+{
+	// The client's window changed size during the session ([MS-RDPEDISP]).
+	// The same policy as at connect decides, against the console's own
+	// size; the main loop notices a new size and reactivates the client.
+	if (fConfig.resize == RESIZE_KEEP) {
+		LOG_D("keeping the display size (resize = keep)");
+		return;
+	}
+	DisplaySize client = { width, height };
+	DisplaySize console = fFrames.OriginalSize();
+	DisplaySize current = fFrames.Size();
+	DisplaySize target;
+	std::vector<DisplaySize> available = fFrames.AvailableSizes();
+	if (!ChooseSessionSize(fConfig.resize, client, console, available,
+			target)) {
+		target = console;
+	}
+	if (target.width == current.width && target.height == current.height) {
+		LOG_D("display stays at %dx%d for a %dx%d window", current.width,
+			current.height, width, height);
+		return;
+	}
+	LOG_I("switching the display from %dx%d to %dx%d for a %dx%d window (%s)",
+		current.width, current.height, target.width, target.height, width,
+		height, ResizePolicyName(fConfig.resize));
+	bool ok = target.width == console.width
+			&& target.height == console.height
+		? (fFrames.RestoreSize(), true) : fFrames.SetSize(target);
+	if (!ok)
+		LOG_W("display mode switch failed");
 }
 
 

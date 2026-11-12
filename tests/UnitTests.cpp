@@ -9,15 +9,21 @@
 
 
 #include <stdio.h>
+#include <unistd.h>
+#include <algorithm>
+#include <sys/stat.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <vector>
 
 #include "Auth.h"
+#include "ClipboardChannel.h"
 #include "ByteStream.h"
 #include "CredSsp.h"
 #include "Crypto.h"
 #include "Der.h"
+#include "DynamicChannels.h"
 #include "Mcs.h"
 #include "Ntlm.h"
 #include "Planar.h"
@@ -241,6 +247,16 @@ TestResize()
 
 	std::vector<DisplaySize> none;
 	CHECK(!ChooseSessionSize(RESIZE_FASTEST, laptop, console, none, target));
+
+	// Fastest keeps a console that fits inside a larger client window,
+	// even without an exact mode for the window.
+	DisplaySize wide = { 2000, 1100 };
+	DisplaySize fullHd = { 1920, 1080 };
+	std::vector<DisplaySize> withSmaller;
+	withSmaller.push_back(DisplaySize{ 1600, 900 });
+	withSmaller.push_back(fullHd);
+	CHECK(!ChooseSessionSize(RESIZE_FASTEST, wide, fullHd, withSmaller,
+		target));
 }
 
 
@@ -550,6 +566,519 @@ TestNtlm()
 }
 
 
+class FakeSender : public ChannelSender {
+public:
+	virtual bool SendChannelData(const Bytes& data)
+	{
+		sent.push_back(data);
+		return true;
+	}
+	std::vector<Bytes> sent;
+};
+
+
+class FakeClipboard : public Clipboard {
+public:
+	FakeClipboard() : generation(0), hasText(false) {}
+	virtual uint32_t Generation() { return generation; }
+	virtual bool GetText(std::string& out)
+	{
+		out = text;
+		return hasText;
+	}
+	virtual void SetText(const std::string& in)
+	{
+		received = in;
+	}
+	virtual bool GetFiles(std::vector<std::string>& paths)
+	{
+		paths = files;
+		return !files.empty();
+	}
+	virtual void SetFiles(const std::vector<std::string>& paths)
+	{
+		receivedFiles = paths;
+	}
+	virtual std::string IncomingFilesFolder() { return folder; }
+	virtual void Notify(const std::string& message) { notices.push_back(message); }
+	uint32_t generation;
+	bool hasText;
+	std::string text;
+	std::string received;
+	std::vector<std::string> files;
+	std::vector<std::string> receivedFiles;
+	std::string folder;
+	std::vector<std::string> notices;
+};
+
+
+static Bytes
+ClipPdu(uint16_t type, uint16_t flags, const Bytes& body)
+{
+	Writer writer;
+	writer.U16LE(type);
+	writer.U16LE(flags);
+	writer.U32LE(body.size());
+	writer.Bytes(body);
+	return writer.Data();
+}
+
+
+static uint16_t
+PduType(const Bytes& pdu)
+{
+	return pdu.size() >= 2 ? (uint16_t)(pdu[0] | (pdu[1] << 8)) : 0;
+}
+
+
+static void
+TestClipboard()
+{
+	// Line ends and NULs.
+	Bytes wire = ClipboardTextToWire("a\nb\r\nc\xc3\xa9");
+	CHECK(SameBytes(wire, Hex("6100 0d00 0a00 6200 0d00 0a00 6300 e900 0000")
+		.data(), 18));
+	CHECK(ClipboardTextFromWire(wire.data(), wire.size())
+		== "a\nb\nc\xc3\xa9");
+	// Text after the first NUL is ignored.
+	Bytes trailing = Hex("6100 0000 6200");
+	CHECK(ClipboardTextFromWire(trailing.data(), trailing.size()) == "a");
+
+	// Long format names: 13 with no name, then a named format.
+	Bytes longList = Hex("0d000000 0000"
+		"0fc00000 4600 6900 6c00 6500 0000");
+	std::vector<ClipboardFormat> formats;
+	CHECK(ParseFormatList(longList.data(), longList.size(), true, false,
+		formats));
+	CHECK(formats.size() == 2 && formats[0].id == 13
+		&& formats[1].id == 0xc00f && formats[1].name == "File");
+	// A name without its terminator is refused.
+	Bytes bad = Hex("0d000000 4100");
+	CHECK(!ParseFormatList(bad.data(), bad.size(), true, false, formats));
+	// Short names are 36 bytes each.
+	Bytes shortList(36, 0);
+	shortList[0] = 13;
+	CHECK(ParseFormatList(shortList.data(), shortList.size(), false, false,
+		formats) && formats.size() == 1 && formats[0].id == 13);
+
+	// The channel: initialization, then a copy on the client.
+	FakeSender sender;
+	FakeClipboard clipboard;
+	ClipboardChannel channel(sender, clipboard, 1024 * 1024);
+	CHECK(channel.Start());
+	CHECK(sender.sent.size() == 2 && PduType(sender.sent[0]) == CB_CLIP_CAPS
+		&& PduType(sender.sent[1]) == CB_MONITOR_READY);
+
+	Writer caps;
+	caps.U16LE(1);
+	caps.U16LE(0);
+	caps.U16LE(CB_CAPSTYPE_GENERAL);
+	caps.U16LE(12);
+	caps.U32LE(2);
+	caps.U32LE(CB_USE_LONG_FORMAT_NAMES);
+	CHECK(channel.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data())));
+
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_LIST, 0, Hex("0d000000 0000"))));
+	// A Format List Response, then a request for the text.
+	CHECK(sender.sent.size() == 2
+		&& PduType(sender.sent[0]) == CB_FORMAT_LIST_RESPONSE
+		&& PduType(sender.sent[1]) == CB_FORMAT_DATA_REQUEST);
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+		ClipboardTextToWire("from Windows\n"))));
+	CHECK(clipboard.received == "from Windows\n");
+
+	// A refused request is asked again after a short delay.
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_LIST, 0, Hex("0d000000 0000"))));
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_FAIL,
+		Bytes())));
+	sender.sent.clear();
+	CHECK(channel.Poll() && sender.sent.empty());
+	usleep(300000);
+	CHECK(channel.Poll() && sender.sent.size() == 1
+		&& PduType(sender.sent[0]) == CB_FORMAT_DATA_REQUEST);
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+		ClipboardTextToWire("second copy"))));
+	CHECK(clipboard.received == "second copy");
+
+	// A local copy is announced, and sent on request.
+	sender.sent.clear();
+	CHECK(channel.Poll() && sender.sent.empty());
+	clipboard.text = "from RenkuOS";
+	clipboard.hasText = true;
+	clipboard.generation++;
+	CHECK(channel.Poll());
+	CHECK(sender.sent.size() == 1 && PduType(sender.sent[0]) == CB_FORMAT_LIST
+		&& SameBytes(Bytes(sender.sent[0].begin() + 8, sender.sent[0].end()),
+			Hex("0d000000 0000").data(), 6));
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_REQUEST, 0,
+		Hex("0d000000"))));
+	CHECK(sender.sent.size() == 1
+		&& PduType(sender.sent[0]) == CB_FORMAT_DATA_RESPONSE
+		&& ClipboardTextFromWire(sender.sent[0].data() + 8,
+			sender.sent[0].size() - 8) == "from RenkuOS");
+
+	// A request for a format that was never offered fails.
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_REQUEST, 0,
+		Hex("01000000"))));
+	CHECK(sender.sent.size() == 1 && sender.sent[0][2] == CB_RESPONSE_FAIL);
+}
+
+
+static std::string
+ReadWholeFile(const std::string& path)
+{
+	std::string text;
+	FILE* file = fopen(path.c_str(), "rb");
+	if (file == NULL)
+		return "<missing>";
+	char buffer[4096];
+	size_t size;
+	while ((size = fread(buffer, 1, sizeof(buffer), file)) > 0)
+		text.append(buffer, size);
+	fclose(file);
+	return text;
+}
+
+
+static void
+TestClipboardFiles()
+{
+	// Names from the client.
+	std::string path;
+	CHECK(SafeRelativePath("dir\\sub\\file.txt", path)
+		&& path == "dir/sub/file.txt");
+	CHECK(SafeRelativePath("..\\..\\etc\\passwd", path)
+		&& path == "etc/passwd");
+	CHECK(SafeRelativePath("/abs/name", path) && path == "abs/name");
+	CHECK(!SafeRelativePath("..\\.", path));
+	CHECK(!SafeRelativePath("bad\x01name", path));
+
+	// File list round trip, with a size above 4 GB.
+	std::vector<ClipboardFile> files(2);
+	files[0].name = "Folder";
+	files[0].directory = true;
+	files[1].name = "Folder\\b\xc3\xa4r.bin";
+	files[1].hasSize = true;
+	files[1].size = 0x123456789ULL;
+	files[1].writeTime = 0x01d9000000000000ULL;
+	Bytes list = BuildFileList(files);
+	CHECK(list.size() == 4 + 2 * 592);
+	std::vector<ClipboardFile> parsed;
+	CHECK(ParseFileList(list.data(), list.size(), parsed));
+	CHECK(parsed.size() == 2 && parsed[0].directory && parsed[0].name == "Folder"
+		&& !parsed[1].directory && parsed[1].size == 0x123456789ULL
+		&& parsed[1].writeTime == 0x01d9000000000000ULL
+		&& parsed[1].name == "Folder\\b\xc3\xa4r.bin");
+	// A list that claims more entries than it has is refused.
+	list[0] = 3;
+	CHECK(!ParseFileList(list.data(), list.size(), parsed));
+
+	// A scratch folder with a folder and two files in it.
+	char base[] = "/tmp/rrd-test-XXXXXX";
+	CHECK(mkdtemp(base) != NULL);
+	std::string root = base;
+	mkdir((root + "/out").c_str(), 0755);
+	mkdir((root + "/out/Folder").c_str(), 0755);
+	FILE* file = fopen((root + "/out/Folder/a.txt").c_str(), "wb");
+	fputs("hello", file);
+	fclose(file);
+	std::string big(1500000, 'x');
+	for (size_t i = 0; i < big.size(); i += 997)
+		big[i] = (char)('a' + i % 26);
+	file = fopen((root + "/out/big.bin").c_str(), "wb");
+	fwrite(big.data(), 1, big.size(), file);
+	fclose(file);
+
+	std::vector<std::string> paths;
+	paths.push_back(root + "/out/Folder");
+	paths.push_back(root + "/out/big.bin");
+	std::vector<ClipboardFile> local;
+	CHECK(CollectLocalFiles(paths, local));
+	CHECK(local.size() == 3 && local[0].name == "Folder" && local[0].directory
+		&& local[1].name == "Folder\\a.txt" && local[1].size == 5
+		&& local[2].name == "big.bin" && local[2].size == big.size());
+
+	// Downloading from the "client": the channel asks for pieces, which we
+	// answer from the files above.
+	FakeSender sender;
+	FakeClipboard clipboard;
+	clipboard.folder = root + "/in";
+	ClipboardChannel channel(sender, clipboard, 100 * 1024 * 1024);
+	CHECK(channel.Start());
+	Writer caps;
+	caps.U16LE(1);
+	caps.U16LE(0);
+	caps.U16LE(CB_CAPSTYPE_GENERAL);
+	caps.U16LE(12);
+	caps.U32LE(2);
+	caps.U32LE(CB_USE_LONG_FORMAT_NAMES | CB_STREAM_FILECLIP_ENABLED);
+	CHECK(channel.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data())));
+
+	sender.sent.clear();
+	Writer formats;
+	formats.U32LE(0xc0a0);
+	formats.Bytes(Utf8ToUtf16Le("FileGroupDescriptorW"));
+	formats.U16LE(0);
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_LIST, 0, formats.Data())));
+	CHECK(sender.sent.size() == 2
+		&& PduType(sender.sent[1]) == CB_FORMAT_DATA_REQUEST);
+
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+		BuildFileList(local))));
+	int pieces = 0;
+	while (!sender.sent.empty() && pieces < 100) {
+		Bytes request = sender.sent.back();
+		sender.sent.clear();
+		if (PduType(request) != CB_FILECONTENTS_REQUEST)
+			break;
+		Reader reader(request.data() + 8, request.size() - 8);
+		uint32_t stream = reader.U32LE();
+		uint32_t index = reader.U32LE();
+		reader.U32LE();
+		uint32_t offset = reader.U32LE();
+		reader.U32LE();
+		uint32_t count = reader.U32LE();
+		std::string content = ReadWholeFile(local[index].localPath);
+		Writer response;
+		response.U32LE(stream);
+		if (offset < content.size()) {
+			response.Bytes((const uint8_t*)content.data() + offset,
+				std::min<size_t>(count, content.size() - offset));
+		}
+		CHECK(channel.Receive(ClipPdu(CB_FILECONTENTS_RESPONSE,
+			CB_RESPONSE_OK, response.Data())));
+		pieces++;
+	}
+	CHECK(pieces == 4);	// a.txt, then big.bin in three pieces
+	CHECK(clipboard.receivedFiles.size() == 2);
+	if (clipboard.receivedFiles.size() == 2) {
+		CHECK(ReadWholeFile(clipboard.receivedFiles[0] + "/a.txt")
+			== "hello");
+		CHECK(ReadWholeFile(clipboard.receivedFiles[1]) == big);
+	}
+
+	// Offering local files: the format list, the file list, and a range.
+	clipboard.files = paths;
+	clipboard.generation++;
+	sender.sent.clear();
+	CHECK(channel.Poll() && sender.sent.size() == 1
+		&& PduType(sender.sent[0]) == CB_FORMAT_LIST);
+	sender.sent.clear();
+	CHECK(channel.Receive(ClipPdu(CB_FORMAT_DATA_REQUEST, 0,
+		Hex("f1c00000"))));
+	CHECK(sender.sent.size() == 1 && sender.sent[0].size() == 8 + 4 + 3 * 592);
+	sender.sent.clear();
+	Writer range;
+	range.U32LE(7);
+	range.U32LE(2);
+	range.U32LE(FILECONTENTS_RANGE);
+	range.U32LE(997);
+	range.U32LE(0);
+	range.U32LE(10);
+	CHECK(channel.Receive(ClipPdu(CB_FILECONTENTS_REQUEST, 0,
+		range.Data())));
+	CHECK(sender.sent.size() == 1 && sender.sent[0].size() == 8 + 4 + 10
+		&& memcmp(sender.sent[0].data() + 12, big.data() + 997, 10) == 0);
+
+	// A copy over the limit is refused with a notice.
+	ClipboardChannel small(sender, clipboard, 1000);
+	small.Start();
+	small.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data()));
+	small.Receive(ClipPdu(CB_FORMAT_LIST, 0, formats.Data()));
+	size_t notices = clipboard.notices.size();
+	sender.sent.clear();
+	small.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+		BuildFileList(local)));
+	CHECK(sender.sent.empty() && clipboard.notices.size() == notices + 1);
+
+	// A skipped name keeps the others' list positions (lindex).
+	{
+		std::vector<ClipboardFile> list(3);
+		list[0].name = "a.txt";
+		list[0].hasSize = true;
+		list[0].size = 1;
+		list[1].name = "bad\tname";
+		list[1].hasSize = true;
+		list[1].size = 1;
+		list[2].name = "c.txt";
+		list[2].hasSize = true;
+		list[2].size = 1;
+		ClipboardChannel skip(sender, clipboard, 1024);
+		skip.Start();
+		skip.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data()));
+		skip.Receive(ClipPdu(CB_FORMAT_LIST, 0, formats.Data()));
+		sender.sent.clear();
+		skip.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+			BuildFileList(list)));
+		std::vector<uint32_t> asked;
+		for (int i = 0; i < 4 && !sender.sent.empty(); i++) {
+			Bytes request = sender.sent.back();
+			sender.sent.clear();
+			if (PduType(request) != CB_FILECONTENTS_REQUEST)
+				break;
+			Reader reader(request.data() + 8, request.size() - 8);
+			uint32_t stream = reader.U32LE();
+			asked.push_back(reader.U32LE());
+			Writer response;
+			response.U32LE(stream);
+			response.U8('x');
+			skip.Receive(ClipPdu(CB_FILECONTENTS_RESPONSE, CB_RESPONSE_OK,
+				response.Data()));
+		}
+		CHECK(asked.size() == 2 && asked[0] == 0 && asked[1] == 2);
+	}
+
+	// A file without a size that never ends stops at the limit.
+	{
+		std::vector<ClipboardFile> list(1);
+		list[0].name = "endless.bin";
+		ClipboardChannel endless(sender, clipboard, 2 * 1024 * 1024);
+		endless.Start();
+		endless.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data()));
+		endless.Receive(ClipPdu(CB_FORMAT_LIST, 0, formats.Data()));
+		sender.sent.clear();
+		size_t before = clipboard.notices.size();
+		// The descriptor's flags without FD_FILESIZE: only FD_ATTRIBUTES.
+		Bytes noSize = BuildFileList(list);
+		noSize[4] = FD_ATTRIBUTES;
+		noSize[5] = noSize[6] = noSize[7] = 0;
+		endless.Receive(ClipPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK,
+			noSize));
+		Bytes piece(512 * 1024, 'z');
+		int answered = 0;
+		while (!sender.sent.empty() && answered < 20) {
+			Bytes request = sender.sent.back();
+			sender.sent.clear();
+			if (PduType(request) != CB_FILECONTENTS_REQUEST)
+				break;
+			Writer response;
+			response.U32LE(request[8] | (request[9] << 8));
+			response.Bytes(piece);
+			endless.Receive(ClipPdu(CB_FILECONTENTS_RESPONSE, CB_RESPONSE_OK,
+				response.Data()));
+			answered++;
+		}
+		CHECK(answered <= 5 && clipboard.notices.size() == before + 1
+			&& clipboard.notices.back().find("limit") != std::string::npos);
+	}
+
+	std::string command = "rm -rf '" + root + "'";
+	CHECK(system(command.c_str()) == 0);
+}
+
+
+class FakeRequester : public DisplaySizeRequester {
+public:
+	FakeRequester() : width(0), height(0) {}
+	virtual void ClientSizeChanged(int32_t w, int32_t h)
+	{
+		width = w;
+		height = h;
+	}
+	int32_t width;
+	int32_t height;
+};
+
+
+class EchoHandler : public DynamicChannelHandler {
+public:
+	EchoHandler() : opened(0) {}
+	virtual bool Opened(DynamicChannels&, uint32_t id)
+	{
+		opened = id;
+		return true;
+	}
+	virtual bool Receive(DynamicChannels&, uint32_t, const Bytes& message)
+	{
+		received = message;
+		return true;
+	}
+	uint32_t opened;
+	Bytes received;
+};
+
+
+static void
+TestDynamicChannels()
+{
+	FakeSender sender;
+	DynamicChannels channels(sender);
+	EchoHandler echo;
+	FakeRequester requester;
+	DisplayControl display(requester);
+	channels.Add("Echo", &echo);
+	channels.Add(DisplayControl::Name(), &display);
+
+	// Capabilities: 0x50, pad, version 1.
+	CHECK(channels.Start());
+	CHECK(sender.sent.size() == 1
+		&& SameBytes(sender.sent[0], Hex("50 00 0100").data(), 4));
+
+	// The client answers; both channels are requested with 1-byte IDs.
+	sender.sent.clear();
+	CHECK(channels.Receive(Hex("50 00 0100")));
+	CHECK(sender.sent.size() == 2
+		&& SameBytes(sender.sent[0], Hex("10 01 4563686f00").data(), 7));
+
+	// Echo opens; display control opens and sends its capabilities.
+	CHECK(channels.Receive(Hex("10 01 00000000")));
+	CHECK(echo.opened == 1);
+	sender.sent.clear();
+	CHECK(channels.Receive(Hex("10 02 00000000")));
+	CHECK(sender.sent.size() == 1
+		&& SameBytes(sender.sent[0],
+			Hex("30 02 05000000 14000000 01000000 00200000 00200000").data(),
+			22));
+
+	// A fragmented message from the client, with a 2-byte Length (Len 1).
+	Bytes big(3000);
+	for (size_t i = 0; i < big.size(); i++)
+		big[i] = (uint8_t)i;
+	Bytes first = Hex("24 01 b80b");
+	first.insert(first.end(), big.begin(), big.begin() + 1596);
+	Bytes rest = Hex("30 01");
+	rest.insert(rest.end(), big.begin() + 1596, big.end());
+	CHECK(channels.Receive(first) && echo.received.empty());
+	CHECK(channels.Receive(rest) && echo.received == big);
+
+	// Sending a large message fragments it into PDUs of at most 1600.
+	sender.sent.clear();
+	CHECK(channels.Send(1, big));
+	size_t total = 0;
+	bool small = true;
+	for (size_t i = 0; i < sender.sent.size(); i++) {
+		small &= sender.sent[i].size() <= 1600;
+		total += sender.sent[i].size();
+	}
+	CHECK(sender.sent.size() == 2 && small && sender.sent[0][0] == 0x28
+		&& total == big.size() + 6 + 2);
+
+	// Messages just over the single-PDU size: one DATA_FIRST, nothing more.
+	for (size_t size = 1591; size <= 1593; size++) {
+		sender.sent.clear();
+		CHECK(channels.Send(1, Bytes(big.begin(), big.begin() + size)));
+		CHECK(sender.sent.size() == 1 && sender.sent[0].size() == 6 + size
+			&& sender.sent[0][0] == 0x28);
+	}
+
+	// A monitor layout: one primary monitor of 1366x768.
+	Bytes layout = Hex("02000000 38000000 28000000 01000000"
+		"01000000 00000000 00000000 56050000 00030000"
+		"00000000 00000000 00000000 64000000 64000000");
+	CHECK(channels.Receive([&]() {
+		Bytes pdu = Hex("30 02");
+		pdu.insert(pdu.end(), layout.begin(), layout.end());
+		return pdu;
+	}()));
+	CHECK(requester.width == 1366 && requester.height == 768);
+}
+
+
 int
 main()
 {
@@ -561,6 +1090,9 @@ main()
 	TestCrypto();
 	TestDer();
 	TestNtlm();
+	TestClipboard();
+	TestClipboardFiles();
+	TestDynamicChannels();
 	TestConnectInitial();
 
 	printf("%d checks, %d failed\n", sChecks, sFailures);

@@ -52,12 +52,13 @@ NowMs()
 
 
 Server::Server(const ServerConfig& config, TlsContext& tls,
-	FrameSource& frames, InputSink& input)
+	FrameSource& frames, InputSink& input, Clipboard& clipboard)
 	:
 	fConfig(config),
 	fTls(tls),
 	fFrames(frames),
 	fInput(input),
+	fClipboard(clipboard),
 	fListenFd(-1),
 	fStopping(false),
 	fActive(NULL)
@@ -146,7 +147,8 @@ Server::Run()
 				close(fd);
 				continue;
 			}
-			session = new Session(fd, fConfig, fTls, fFrames, fInput, *this);
+			session = new Session(fd, fConfig, fTls, fFrames, fInput,
+				fClipboard, *this);
 		}
 
 		if (!AllowConnection(session->Peer())) {
@@ -215,6 +217,7 @@ Server::UpdateConfig(const ServerConfig& config)
 	fConfig.ntHash = config.ntHash;
 	fConfig.resize = config.resize;
 	fConfig.frameIntervalMs = config.frameIntervalMs;
+	fConfig.incomingFilesLimitMB = config.incomingFilesLimitMB;
 }
 
 

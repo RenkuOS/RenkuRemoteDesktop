@@ -63,8 +63,12 @@ Log(LogLevel level, const char* format, ...)
 	pthread_mutex_unlock(&sLock);
 
 #ifdef __HAIKU__
-	if (level <= kLogInfo) {
-		static const int kPriorities[] = { LOG_ERR, LOG_WARNING, LOG_INFO };
+	{
+		// Everything the level lets through: when the server runs as a
+		// service, its stderr goes nowhere, so the system log is the only
+		// place debug output can be read.
+		static const int kPriorities[] = { LOG_ERR, LOG_WARNING, LOG_INFO,
+			LOG_DEBUG, LOG_DEBUG };
 		syslog(kPriorities[level], "RenkuRemoteDesktop: %s", message);
 	}
 #endif

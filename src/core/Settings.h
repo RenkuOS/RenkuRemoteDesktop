@@ -23,6 +23,9 @@ namespace rrd {
 //   port = 3389
 //   bind = 192.168.1.10        (empty: all interfaces)
 //   frame_interval_ms = 40
+//   log_level = info               (error, warning, info, debug, trace)
+//   incoming_files_limit_mb = 500   (larger copies from the client are
+//                                    refused)
 //
 // Unknown keys are ignored with a warning.
 bool LoadSettings(const std::string& path, ServerConfig& config);

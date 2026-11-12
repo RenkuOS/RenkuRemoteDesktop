@@ -195,3 +195,14 @@ ScreenFrameSource::RestoreSize()
 		LOG_W("cannot restore the original display mode");
 	fModeChanged = false;
 }
+
+
+DisplaySize
+ScreenFrameSource::OriginalSize()
+{
+	if (!fModeChanged)
+		return Size();
+	DisplaySize size = { fOriginalMode.virtual_width,
+		fOriginalMode.virtual_height };
+	return size;
+}

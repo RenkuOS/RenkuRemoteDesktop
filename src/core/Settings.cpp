@@ -60,6 +60,13 @@ LoadSettings(const std::string& path, ServerConfig& config)
 			config.passwordHash = value;
 		else if (key == "nt_hash")
 			config.ntHash = value;
+		else if (key == "log_level")
+			config.logLevel = value;
+		else if (key == "incoming_files_limit_mb") {
+			long limit = atol(value.c_str());
+			if (limit >= 0 && limit <= 1024 * 1024)
+				config.incomingFilesLimitMB = (uint32_t)limit;
+		}
 		else if (key == "resize") {
 			if (!ParseResizePolicy(value.c_str(), config.resize))
 				LOG_W("%s:%d: unknown resize policy \"%s\"", path.c_str(),
@@ -105,6 +112,10 @@ SaveSettings(const std::string& path, const ServerConfig& config)
 	fprintf(file, "port = %u\n", config.port);
 	fprintf(file, "bind = %s\n", config.bindAddress.c_str());
 	fprintf(file, "frame_interval_ms = %d\n", config.frameIntervalMs);
+	if (!config.logLevel.empty())
+		fprintf(file, "log_level = %s\n", config.logLevel.c_str());
+	fprintf(file, "incoming_files_limit_mb = %u\n",
+		config.incomingFilesLimitMB);
 
 	bool ok = fflush(file) == 0 && fsync(fd) == 0;
 	ok &= fclose(file) == 0;

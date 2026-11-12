@@ -5,6 +5,7 @@
 
 
 #include <Application.h>
+#include <Clipboard.h>
 #include <FindDirectory.h>
 #include <Path.h>
 
@@ -18,6 +19,8 @@
 
 #include "Auth.h"
 #include "ControlProtocol.h"
+#include "ClipboardChannel.h"
+#include "HaikuClipboard.h"
 #include "Log.h"
 #include "PortInputSink.h"
 #include "ObserverFrameSource.h"
@@ -48,16 +51,19 @@ public:
 		BApplication(kSignature),
 		fServer(NULL),
 		fFrames(NULL),
+		fClipboard(NULL),
 		fCapture(""),
 		fStopped(false)
 	{
 	}
 
 	void StartServer(Server* server, ScreenFrameSource* frames,
-		const char* capture, const std::string& settingsPath,
-		const ServerConfig& config)
+		HaikuClipboard* clipboard, const char* capture,
+		const std::string& settingsPath, const ServerConfig& config)
 	{
 		fServer = server;
+		fClipboard = clipboard;
+		fClipboard->StartWatching();
 		fFrames = frames;
 		fCapture = capture;
 		fSettingsPath = settingsPath;
@@ -90,6 +96,10 @@ public:
 			case RRD_MSG_RELOAD_SETTINGS:
 				_ReloadSettings(message);
 				return;
+			case B_CLIPBOARD_CHANGED:
+				if (fClipboard != NULL)
+					fClipboard->Changed();
+				return;
 			case kMsgServerStopped:
 				break;
 			default:
@@ -101,6 +111,8 @@ public:
 		if (fThread.joinable())
 			fThread.join();
 		fFrames->Release();
+		if (fClipboard != NULL)
+			fClipboard->StopWatching();
 		fStopped = true;
 		PostMessage(B_QUIT_REQUESTED);
 	}
@@ -153,6 +165,7 @@ private:
 
 	Server*				fServer;
 	ScreenFrameSource*	fFrames;
+	HaikuClipboard*		fClipboard;
 	const char*			fCapture;
 	std::string			fSettingsPath;
 	ServerConfig		fConfig;
@@ -208,6 +221,12 @@ main(int argc, char** argv)
 
 	ServerConfig config;
 	LoadSettings(settingsPath, config);
+	static const char* kLevels[] = { "error", "warning", "info", "debug",
+		"trace" };
+	for (int i = 0; i < 5; i++) {
+		if (config.logLevel == kLevels[i])
+			SetLogLevel((LogLevel)i);
+	}
 
 	bool setPassword = false;
 	bool save = false;
@@ -299,13 +318,20 @@ main(int argc, char** argv)
 		LOG_I("capture: reading the whole screen each frame");
 
 	PortInputSink input;
-	Server server(config, tls, *frames, input);
+	HaikuClipboard clipboard;
+	// Copies from clients are kept for a week (scope document, 9.2).
+	int removed = CleanUpIncomingFiles(clipboard.IncomingFilesFolder(),
+		7 * 24 * 3600);
+	if (removed > 0)
+		LOG_I("removed %d copies older than a week from Remote files", removed);
+	Server server(config, tls, *frames, input, clipboard);
 	if (!server.Listen()) {
 		frames->Release();
 		return StartupFailed(service);
 	}
 
-	app.StartServer(&server, frames, capture, settingsPath, config);
+	app.StartServer(&server, frames, &clipboard, capture, settingsPath,
+		config);
 	app.Run();
 	return 0;
 }

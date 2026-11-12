@@ -25,12 +25,20 @@ Remmina on Linux, and use the desktop that is on the machine's screen.
 - Keyboard and mouse: scancodes through the RenkuOS keymap, Unicode input,
   absolute pointer, buttons, wheel, and lock-key sync.
 - Session takeover: a new login replaces the current session.
-- Resize on connect, with a choice of policy.
+- Resize on connect and when the client's window changes size (display
+  control), with a choice of policy. The display can only take sizes its
+  driver offers.
+- The clipboard in both directions: text, and files. Files copied on the
+  client are copied into `~/Desktop/Remote files/` and then put on the
+  clipboard, so Paste in Tracker works. Files copied in Tracker can be
+  pasted on the client. Copies from the client above 500 MB are refused
+  (`incoming_files_limit_mb`), and copies older than a week are removed when
+  the server starts.
 - The Remote Desktop preferences: on and off, password, port, address,
   screen size, the certificate fingerprint, and who is connected.
 
-Not yet: clipboard and file transfer. See [docs/testing.md](docs/testing.md)
-for what has been tested, with which clients.
+See [docs/testing.md](docs/testing.md) for what has been tested, with which
+clients.
 
 ## Building
 
@@ -93,7 +101,8 @@ The server also runs by hand:
 ## Design
 
 The protocol is written from Microsoft's published specifications
-([MS-RDPBCGR], [MS-RDPEGDI], [MS-CSSP], [MS-NLMP], [MS-RDPECLIP]). No code
+([MS-RDPBCGR], [MS-RDPEGDI], [MS-CSSP], [MS-NLMP], [MS-SPNG],
+[MS-RDPECLIP], [MS-RDPEDYC], [MS-RDPEDISP]). No code
 comes from other RDP implementations. Comments cite the specification
 sections.
 

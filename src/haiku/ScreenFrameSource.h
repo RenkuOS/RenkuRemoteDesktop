@@ -32,6 +32,7 @@ public:
 	virtual	std::vector<rrd::DisplaySize> AvailableSizes();
 	virtual	bool				SetSize(const rrd::DisplaySize& size);
 	virtual	void				RestoreSize();
+	virtual	rrd::DisplaySize	OriginalSize();
 
 			// Restores the display mode and frees the bitmap. Call it while
 			// the BApplication still exists: both need app_server.
