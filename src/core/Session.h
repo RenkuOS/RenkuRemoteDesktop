@@ -78,6 +78,11 @@ public:
 			void			Abort();
 
 			const std::string& Peer() const;
+			// Set once the login succeeded, and not changed afterwards.
+			const std::string& UserName() const { return fUserName; }
+			bool			UsedNla() const { return fNlaAuthenticated; }
+			// Wall-clock time of the login, in seconds since the epoch.
+			int64_t			LoginTime() const { return fLoginTime; }
 
 private:
 			struct Pdu {
@@ -125,7 +130,9 @@ private:
 			bool			_FlushBitmaps(Writer& rects, uint16_t& count);
 
 			int				fFd;
-			const ServerConfig& fConfig;
+			// A copy: the server can change its settings while this session
+			// runs.
+			const ServerConfig fConfig;
 			TlsContext&		fTls;
 			FrameSource&	fFrames;
 			InputSink&		fInput;
@@ -140,6 +147,8 @@ private:
 			uint16_t		fUserChannelId;
 			bool			fNlaAuthenticated;
 			std::string		fNlaUser;
+			std::string		fUserName;
+			int64_t			fLoginTime;
 			bool			fOwnsDesktop;
 			bool			fActive;
 			bool			fOutputSuppressed;

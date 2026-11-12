@@ -399,6 +399,19 @@ RemoteInputDevice::_Pointer(int32 x, int32 y, uint32 buttons)
 	else if (where == fWhere)
 		return;
 
+	// app_server takes the cursor position only from B_MOUSE_MOVED. It
+	// reports a button event at that position, whatever the event itself
+	// says (EventDispatcher). RDP clients send a move and a click as one
+	// button event with the new position, so move there first.
+	if (what != B_MOUSE_MOVED && where != fWhere) {
+		BMessage* moved = new BMessage(B_MOUSE_MOVED);
+		moved->AddInt64("when", now);
+		moved->AddInt32("buttons", fButtons);
+		moved->AddPoint("where", where);
+		fWhere = where;
+		_Enqueue(moved);
+	}
+
 	BMessage* message = new BMessage(what);
 	message->AddInt64("when", now);
 	message->AddInt32("buttons", buttons);

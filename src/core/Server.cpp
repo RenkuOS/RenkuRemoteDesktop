@@ -207,6 +207,48 @@ Server::_AbortOverduePending()
 }
 
 
+void
+Server::UpdateConfig(const ServerConfig& config)
+{
+	std::lock_guard<std::mutex> lock(fLock);
+	fConfig.passwordHash = config.passwordHash;
+	fConfig.ntHash = config.ntHash;
+	fConfig.resize = config.resize;
+	fConfig.frameIntervalMs = config.frameIntervalMs;
+}
+
+
+Server::Status
+Server::ActiveSession()
+{
+	std::lock_guard<std::mutex> lock(fLock);
+	Status status;
+	status.connected = fActive != NULL;
+	status.nla = false;
+	status.since = 0;
+	if (fActive != NULL) {
+		// The active session is alive while fLock is held (see
+		// SessionActivating()), and these fields no longer change.
+		status.peer = fActive->Peer();
+		status.user = fActive->UserName();
+		status.nla = fActive->UsedNla();
+		status.since = fActive->LoginTime();
+	}
+	return status;
+}
+
+
+void
+Server::Disconnect()
+{
+	std::lock_guard<std::mutex> lock(fLock);
+	if (fActive != NULL) {
+		LOG_I("disconnecting %s on request", fActive->Peer().c_str());
+		fActive->Kick(ERRINFO_RPC_INITIATED_DISCONNECT);
+	}
+}
+
+
 // Only sets a flag, so it is safe from a signal handler. Run() notices it
 // within half a second, then ends the sessions before it returns.
 void

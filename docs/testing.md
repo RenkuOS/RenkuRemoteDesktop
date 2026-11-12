@@ -199,3 +199,49 @@ is closed by the server's 20-second read timeout; the other is the session.
 
 Code review found one blocker: the bounds check on NTLM message fields could
 wrap on 32-bit targets. It is fixed.
+
+## 2026-11-12, Remote Desktop preferences and the launch_daemon service
+
+### Setup
+
+`make install DESTDIR=… PREFIX=/boot/system/non-packaged` staged the files,
+which were then moved into `/boot/system/non-packaged` on the Supermicro
+Test Desktop: `servers/RenkuRemoteDesktop`, `preferences/Remote Desktop`,
+the input add-on, and `data/user_launch/RenkuRemoteDesktop`. The panel was
+driven through an RDP session from FreeRDP 3.32 (xdotool clicks), and with
+`hey` where no session was possible.
+
+### Results
+
+| Test | Result |
+|---|---|
+| launch_daemon reads the service after a reboot; condition `file_exists …/enabled`, launch path from `PREFIX` | Pass (`launch_roster info`) |
+| Switch on (enabled file, then launch_daemon start) | Pass: started under launch_daemon, fast capture |
+| Panel status while connected | Pass: "Connected: kevin from 192.168.74.137 since 13:52." |
+| Certificate fingerprint in the panel | Pass: matches the server log |
+| Password dialog: hidden typing, too short, mismatch | Pass: "The two passwords differ.", button disabled |
+| Port 3389 to 3390 in the panel | Pass: settings saved, server quit and was relaunched by launch_daemon on 3390, job still enabled |
+| Defaults (port 3389, resize fastest) | Pass: restarted on 3389 |
+| Revert | Pass: back to `keep`; reloaded without a restart, session kept |
+| Disconnect | Pass after the input fix below: "disconnecting … on request", client ended |
+| Switch off | Pass: session ended, enabled file removed, job disabled, still stopped 10 s later |
+| Switch on again (panel handler, through `hey`) | Pass: relaunched under launch_daemon, "On. Waiting for connections on port 3389." |
+| Listen address not on the machine | Pass: "cannot listen … Can't assign requested address", "trying again in 30 seconds"; panel shows "Not running. The system log (syslog) has the reason." |
+| Recovery once the address is fixed | Pass: back on the next attempt, one failure logged (no restart loop) |
+| Reboot with the switch on | Pass: started with the desktop; NLA login works |
+| Set a new password from the panel | **Not tested** (the dialog was only cancelled) |
+| Panel listed in the Deskbar Preferences menu | **Not tested** (non-packaged install) |
+
+### Found in testing: clicks landing outside buttons
+
+The panel's Disconnect button stayed pressed and never fired. The mouse
+events showed `screen_where` at the previous pointer position. app_server
+takes the cursor position only from `B_MOUSE_MOVED` and fills in
+`screen_where` for button events from it (`EventDispatcher.cpp`). FreeRDP
+sends "move here and click" as just a button event with the new position,
+so the input add-on now sends a `B_MOUSE_MOVED` first whenever a button
+event comes with a new position. This affected clicks everywhere, not only
+the panel, whenever a client sent no separate move before a click.
+
+Replacing the input add-on file while input_server runs unloaded the old one
+without loading the new one; restarting input_server fixed that.

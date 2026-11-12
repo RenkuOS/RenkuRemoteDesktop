@@ -93,6 +93,7 @@ Session::Session(int fd, const ServerConfig& config, TlsContext& tls,
 	fShareId(0x000103ea),
 	fUserChannelId(0),
 	fNlaAuthenticated(false),
+	fLoginTime(0),
 	fOwnsDesktop(false),
 	fActive(false),
 	fOutputSuppressed(false),
@@ -572,6 +573,9 @@ Session::_HandleClientInfo(Reader& reader)
 		LOG_I("login from %s (user \"%s\") accepted", Peer().c_str(),
 			userName.c_str());
 	}
+	// With NLA, the name the client proved is the one that counts.
+	fUserName = fNlaAuthenticated ? fNlaUser : userName;
+	fLoginTime = time(NULL);
 	return true;
 }
 
@@ -689,8 +693,11 @@ Session::_MainLoop()
 			return;
 		}
 		if (fKicked) {
-			LOG_I("session from %s replaced by a new connection",
-				Peer().c_str());
+			if (fKickReason == ERRINFO_DISCONNECTED_BY_OTHERCONNECTION) {
+				LOG_I("session from %s replaced by a new connection",
+					Peer().c_str());
+			} else
+				LOG_I("session from %s ended on request", Peer().c_str());
 			_SendErrorInfo(fKickReason);
 			fTransport->WriteAll(
 				WrapX224Data(BuildDisconnectProviderUltimatum()));

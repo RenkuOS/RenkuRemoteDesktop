@@ -29,6 +29,22 @@ public:
 	virtual						~Server();
 
 			bool				Listen();
+
+			// Applies changed login settings (password hashes, resize policy,
+			// frame rate) to new connections. The port and address stay
+			// until the server is restarted.
+			void				UpdateConfig(const ServerConfig& config);
+
+			struct Status {
+				bool			connected;
+				std::string		peer;
+				std::string		user;
+				bool			nla;
+				int64_t			since;
+			};
+			Status				ActiveSession();
+			// Ends the active session, if there is one.
+			void				Disconnect();
 			// Accepts connections until Stop() is called, then ends all
 			// sessions and returns once none is running.
 			void				Run();
@@ -48,7 +64,7 @@ private:
 				int64_t	firstMs;
 			};
 
-			const ServerConfig&	fConfig;
+			ServerConfig		fConfig;
 			TlsContext&			fTls;
 			FrameSource&		fFrames;
 			InputSink&			fInput;

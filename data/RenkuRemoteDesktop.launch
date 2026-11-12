@@ -1,0 +1,14 @@
+# The RenkuRemoteDesktop RDP server, started with the desktop. The Remote
+# Desktop preferences turn it on and off by creating or deleting the
+# "enabled" file; they also start and stop it through launch_daemon.
+# Installed as data/user_launch/RenkuRemoteDesktop; "make install" fills in
+# the server path.
+
+target desktop {
+	service x-vnd.RenkuOS-RemoteDesktop {
+		launch @SERVER@ --service
+		if file_exists ~/config/settings/RenkuRemoteDesktop/enabled
+		on initial_volumes_mounted
+		no_safemode
+	}
+}

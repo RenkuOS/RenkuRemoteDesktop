@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "Auth.h"
+#include "ControlProtocol.h"
 #include "Log.h"
 #include "PortInputSink.h"
 #include "ObserverFrameSource.h"
@@ -29,7 +30,7 @@
 using namespace rrd;
 
 
-static const char* kSignature = "application/x-vnd.RenkuOS-RemoteDesktop";
+static const char* kSignature = RRD_SERVER_SIGNATURE;
 
 
 // The server runs on its own thread. Sessions capture the screen through
@@ -47,14 +48,20 @@ public:
 		BApplication(kSignature),
 		fServer(NULL),
 		fFrames(NULL),
+		fCapture(""),
 		fStopped(false)
 	{
 	}
 
-	void StartServer(Server* server, ScreenFrameSource* frames)
+	void StartServer(Server* server, ScreenFrameSource* frames,
+		const char* capture, const std::string& settingsPath,
+		const ServerConfig& config)
 	{
 		fServer = server;
 		fFrames = frames;
+		fCapture = capture;
+		fSettingsPath = settingsPath;
+		fConfig = config;
 		fThread = std::thread([this]() {
 			fServer->Run();
 			PostMessage(kMsgServerStopped);
@@ -72,10 +79,24 @@ public:
 
 	virtual void MessageReceived(BMessage* message)
 	{
-		if (message->what != kMsgServerStopped) {
-			BApplication::MessageReceived(message);
-			return;
+		switch (message->what) {
+			case RRD_MSG_GET_STATUS:
+				_SendStatus(message);
+				return;
+			case RRD_MSG_DISCONNECT:
+				if (fServer != NULL)
+					fServer->Disconnect();
+				return;
+			case RRD_MSG_RELOAD_SETTINGS:
+				_ReloadSettings(message);
+				return;
+			case kMsgServerStopped:
+				break;
+			default:
+				BApplication::MessageReceived(message);
+				return;
 		}
+
 		// Run() has returned and no session is left.
 		if (fThread.joinable())
 			fThread.join();
@@ -85,11 +106,77 @@ public:
 	}
 
 private:
+	void _SendStatus(BMessage* request)
+	{
+		BMessage reply(RRD_MSG_STATUS);
+		reply.AddInt32("port", fConfig.port);
+		reply.AddString("bind", fConfig.bindAddress.c_str());
+		reply.AddString("capture", fCapture);
+		uint8 hash[16];
+		reply.AddBool("nla", ParseNtHash(fConfig.ntHash, hash));
+		Server::Status status;
+		status.connected = false;
+		if (fServer != NULL)
+			status = fServer->ActiveSession();
+		reply.AddBool("connected", status.connected);
+		if (status.connected) {
+			reply.AddString("peer", status.peer.c_str());
+			reply.AddString("user", status.user.c_str());
+			reply.AddBool("session_nla", status.nla);
+			reply.AddInt64("since", status.since);
+		}
+		request->SendReply(&reply);
+	}
+
+	void _ReloadSettings(BMessage* request)
+	{
+		ServerConfig config;
+		bool loaded = LoadSettings(fSettingsPath, config);
+		bool restart = false;
+		if (loaded) {
+			restart = config.port != fConfig.port
+				|| config.bindAddress != fConfig.bindAddress;
+			// The listening socket stays as it is until a restart.
+			config.port = fConfig.port;
+			config.bindAddress = fConfig.bindAddress;
+			fConfig = config;
+			if (fServer != NULL)
+				fServer->UpdateConfig(config);
+			LOG_I("settings reloaded%s", restart
+				? "; the new port or address needs a restart" : "");
+		}
+		BMessage reply(RRD_MSG_RELOADED);
+		reply.AddInt32("status", loaded ? B_OK : B_ERROR);
+		reply.AddBool("restart", restart);
+		request->SendReply(&reply);
+	}
+
 	Server*				fServer;
 	ScreenFrameSource*	fFrames;
+	const char*			fCapture;
+	std::string			fSettingsPath;
+	ServerConfig		fConfig;
 	std::thread			fThread;
 	bool				fStopped;
 };
+
+
+// Under launch_daemon (--service), a server that exits is started again at
+// once, without any throttle. So a server that cannot start waits a while
+// before it exits, instead of being restarted in a tight loop.
+static const bigtime_t kServiceFailureDelay = 30000000;
+
+
+static int
+StartupFailed(bool service)
+{
+	if (service) {
+		LOG_E("cannot start; trying again in %d seconds",
+			(int)(kServiceFailureDelay / 1000000));
+		snooze(kServiceFailureDelay);
+	}
+	return 1;
+}
 
 
 static void
@@ -103,6 +190,8 @@ Usage(const char* name)
 		"  --bind ADDRESS    listen on one IPv4 address only\n"
 		"  --poll            capture by reading the whole screen, even\n"
 		"                    where app_server can report changes\n"
+		"  --service         started by launch_daemon: wait before exiting\n"
+		"                    when the server cannot start\n"
 		"  -v, -vv           more logging\n", name);
 }
 
@@ -111,9 +200,8 @@ int
 main(int argc, char** argv)
 {
 	BPath path;
-	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+	if (rrd_settings_directory(path) != B_OK)
 		return 1;
-	path.Append("RenkuRemoteDesktop");
 	mkdir(path.Path(), 0700);
 	std::string directory = path.Path();
 	std::string settingsPath = directory + "/settings";
@@ -124,6 +212,7 @@ main(int argc, char** argv)
 	bool setPassword = false;
 	bool save = false;
 	bool poll = false;
+	bool service = false;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--set-password") == 0)
 			setPassword = true;
@@ -141,6 +230,8 @@ main(int argc, char** argv)
 			save = true;
 		} else if (strcmp(argv[i], "--poll") == 0)
 			poll = true;
+		else if (strcmp(argv[i], "--service") == 0)
+			service = true;
 		else if (strcmp(argv[i], "-v") == 0)
 			SetLogLevel(kLogDebug);
 		else if (strcmp(argv[i], "-vv") == 0)
@@ -181,16 +272,16 @@ main(int argc, char** argv)
 	}
 
 	if (config.passwordHash.empty()) {
-		fprintf(stderr, "No password is set. Run %s --set-password first.\n",
-			argv[0]);
-		return 1;
+		LOG_E("no password is set; set one in the Remote Desktop "
+			"preferences or with %s --set-password", argv[0]);
+		return StartupFailed(service);
 	}
 
 	signal(SIGPIPE, SIG_IGN);
 
 	TlsContext tls;
 	if (!tls.Init(directory + "/certificate.pem", directory + "/key.pem"))
-		return 1;
+		return StartupFailed(service);
 
 	// The application first: capturing the screen needs its connection to
 	// app_server.
@@ -199,8 +290,10 @@ main(int argc, char** argv)
 	ObserverFrameSource observer;
 	ScreenFrameSource polling;
 	ScreenFrameSource* frames = &polling;
+	const char* capture = "polling";
 	if (!poll && observer.Start()) {
 		frames = &observer;
+		capture = "observer";
 		LOG_I("capture: app_server screen observer");
 	} else
 		LOG_I("capture: reading the whole screen each frame");
@@ -209,10 +302,10 @@ main(int argc, char** argv)
 	Server server(config, tls, *frames, input);
 	if (!server.Listen()) {
 		frames->Release();
-		return 1;
+		return StartupFailed(service);
 	}
 
-	app.StartServer(&server, frames);
+	app.StartServer(&server, frames, capture, settingsPath, config);
 	app.Run();
 	return 0;
 }
