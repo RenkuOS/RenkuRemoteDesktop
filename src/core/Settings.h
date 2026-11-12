@@ -26,6 +26,7 @@ namespace rrd {
 //   log_level = info               (error, warning, info, debug, trace)
 //   incoming_files_limit_mb = 500   (larger copies from the client are
 //                                    refused)
+//   file_transfer = true            (files through copy and paste)
 //
 // Unknown keys are ignored with a warning.
 bool LoadSettings(const std::string& path, ServerConfig& config);

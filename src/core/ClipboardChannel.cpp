@@ -416,11 +416,12 @@ CleanUpIncomingFiles(const std::string& folder, int64_t maxAgeSeconds)
 
 
 ClipboardChannel::ClipboardChannel(ChannelSender& sender,
-	Clipboard& clipboard, uint64_t incomingLimit)
+	Clipboard& clipboard, uint64_t incomingLimit, bool allowFiles)
 	:
 	fSender(sender),
 	fClipboard(clipboard),
 	fIncomingLimit(incomingLimit),
+	fAllowFiles(allowFiles),
 	fStarted(false),
 	fLongNames(false),
 	fClientFiles(false),
@@ -460,7 +461,7 @@ ClipboardChannel::Start()
 
 	// Clipboard Capabilities PDU (2.2.2.1): one General Capability Set.
 	uint32_t flags = CB_USE_LONG_FORMAT_NAMES;
-	if (!fClipboard.IncomingFilesFolder().empty()) {
+	if (_FilesEnabled()) {
 		flags |= CB_STREAM_FILECLIP_ENABLED | CB_FILECLIP_NO_FILE_PATHS
 			| CB_HUGE_FILE_SUPPORT_ENABLED;
 	}
@@ -626,7 +627,7 @@ ClipboardChannel::_HandleCapabilities(const uint8_t* data, size_t size)
 			if (set.Ok()) {
 				fLongNames = (flags & CB_USE_LONG_FORMAT_NAMES) != 0;
 				fClientFiles = (flags & CB_STREAM_FILECLIP_ENABLED) != 0
-					&& !fClipboard.IncomingFilesFolder().empty();
+					&& _FilesEnabled();
 				LOG_D("clipboard: client flags 0x%08x", flags);
 			}
 		}
@@ -681,6 +682,13 @@ ClipboardChannel::_HandleFormatList(uint16_t flags, const uint8_t* data,
 	if (format == 0)
 		return true;
 	return _RequestFormat(format);
+}
+
+
+bool
+ClipboardChannel::_FilesEnabled()
+{
+	return fAllowFiles && !fClipboard.IncomingFilesFolder().empty();
 }
 
 

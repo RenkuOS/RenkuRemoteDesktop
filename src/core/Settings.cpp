@@ -62,6 +62,9 @@ LoadSettings(const std::string& path, ServerConfig& config)
 			config.ntHash = value;
 		else if (key == "log_level")
 			config.logLevel = value;
+		else if (key == "file_transfer")
+			config.fileTransfer = value == "true" || value == "yes"
+				|| value == "1";
 		else if (key == "incoming_files_limit_mb") {
 			long limit = atol(value.c_str());
 			if (limit >= 0 && limit <= 1024 * 1024)
@@ -116,6 +119,8 @@ SaveSettings(const std::string& path, const ServerConfig& config)
 		fprintf(file, "log_level = %s\n", config.logLevel.c_str());
 	fprintf(file, "incoming_files_limit_mb = %u\n",
 		config.incomingFilesLimitMB);
+	fprintf(file, "file_transfer = %s\n",
+		config.fileTransfer ? "true" : "false");
 
 	bool ok = fflush(file) == 0 && fsync(fd) == 0;
 	ok &= fclose(file) == 0;

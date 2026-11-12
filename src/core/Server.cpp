@@ -143,7 +143,13 @@ Server::Run()
 		{
 			std::lock_guard<std::mutex> lock(fLock);
 			if (fPending.size() >= (size_t)kMaxPending) {
-				LOG_W("too many connections still logging in, refusing one");
+				struct sockaddr_in peer;
+				socklen_t length = sizeof(peer);
+				char address[INET_ADDRSTRLEN] = "?";
+				if (getpeername(fd, (struct sockaddr*)&peer, &length) == 0)
+					inet_ntop(AF_INET, &peer.sin_addr, address, sizeof(address));
+				LOG_W("too many connections still logging in, refusing %s",
+					address);
 				close(fd);
 				continue;
 			}
@@ -218,6 +224,7 @@ Server::UpdateConfig(const ServerConfig& config)
 	fConfig.resize = config.resize;
 	fConfig.frameIntervalMs = config.frameIntervalMs;
 	fConfig.incomingFilesLimitMB = config.incomingFilesLimitMB;
+	fConfig.fileTransfer = config.fileTransfer;
 }
 
 

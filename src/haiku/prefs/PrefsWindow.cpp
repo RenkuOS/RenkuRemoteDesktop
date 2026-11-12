@@ -58,6 +58,7 @@ static const uint32 kMsgSetPassword = 'peSP';
 static const uint32 kMsgPort = 'pePo';
 static const uint32 kMsgAddress = 'peAd';
 static const uint32 kMsgResize = 'peRs';
+static const uint32 kMsgFileTransfer = 'peFT';
 static const uint32 kMsgDefaults = 'peDf';
 static const uint32 kMsgRevert = 'peRv';
 static const uint32 kMsgPulse = 'pePu';
@@ -202,6 +203,10 @@ PrefsWindow::PrefsWindow()
 	fResizeField = new BMenuField("resize", B_TRANSLATE("Screen size:"),
 		fResizeMenu);
 
+	fFileTransfer = new BCheckBox("file transfer",
+		B_TRANSLATE("Allow file transfer through copy and paste"),
+		new BMessage(kMsgFileTransfer));
+
 	BBox* connectionBox = new BBox("connection box");
 	connectionBox->SetLabel(B_TRANSLATE("Connection"));
 	BLayoutBuilder::Grid<>(connectionBox, B_USE_DEFAULT_SPACING,
@@ -210,7 +215,8 @@ PrefsWindow::PrefsWindow()
 			B_USE_DEFAULT_SPACING, B_USE_DEFAULT_SPACING)
 		.AddTextControl(fPort, 0, 0)
 		.AddMenuField(fAddressField, 0, 1)
-		.AddMenuField(fResizeField, 0, 2);
+		.AddMenuField(fResizeField, 0, 2)
+		.Add(fFileTransfer, 0, 3, 2);
 
 	// Certificate
 	fFingerprint = new BTextView("fingerprint");
@@ -368,12 +374,18 @@ PrefsWindow::MessageReceived(BMessage* message)
 			break;
 		}
 
+		case kMsgFileTransfer:
+			fConfig.fileTransfer = fFileTransfer->Value() == B_CONTROL_ON;
+			_Save();
+			break;
+
 		case kMsgDefaults:
 		{
 			ServerConfig defaults;
 			fConfig.port = defaults.port;
 			fConfig.bindAddress = defaults.bindAddress;
 			fConfig.resize = defaults.resize;
+			fConfig.fileTransfer = defaults.fileTransfer;
 			_Save();
 			_UpdateControls();
 			break;
@@ -513,16 +525,21 @@ PrefsWindow::_UpdateControls()
 			== fConfig.resize);
 	}
 
+	fFileTransfer->SetValue(fConfig.fileTransfer
+		? B_CONTROL_ON : B_CONTROL_OFF);
+
 	bool sameAsOriginal = fConfig.port == fOriginal.port
 		&& fConfig.bindAddress == fOriginal.bindAddress
 		&& fConfig.resize == fOriginal.resize
+		&& fConfig.fileTransfer == fOriginal.fileTransfer
 		&& fConfig.passwordHash == fOriginal.passwordHash
 		&& ServiceControl::IsEnabled() == fOriginalEnabled;
 	fRevert->SetEnabled(!sameAsOriginal);
 	ServerConfig defaults;
 	fDefaults->SetEnabled(fConfig.port != defaults.port
 		|| fConfig.bindAddress != defaults.bindAddress
-		|| fConfig.resize != defaults.resize);
+		|| fConfig.resize != defaults.resize
+		|| fConfig.fileTransfer != defaults.fileTransfer);
 }
 
 

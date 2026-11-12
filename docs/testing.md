@@ -263,7 +263,10 @@ without loading the new one; restarting input_server fixed that.
 | Text, server to client, Supermicro Test Desktop (`clipboard -c`) | Pass |
 | Files, client to server, Supermicro Test Desktop | Pass: in `~/Desktop/Remote files/<date time>/`, `photo.bin` identical (MD5); the clipboard holds Tracker's `r<device>_<node>` refs with `'Tcsl'` (copy) modes |
 | Text with Windows 11 mstsc, several copies in a row | First version: some copies were never fetched. mstsc answered the immediate request with "fail" (log: PDU 0x0005, flags 0x2), so RenkuOS kept the older text. Fixed: a refused request is repeated after 250, 500, and 1000 ms. Retest: **pass**, every paste was the latest copy (4 texts fetched, 2 of them after a retry) |
-| Paste in Tracker, files and resize with mstsc | **Not tested yet** |
+| Files, Windows 11 Explorer to RenkuOS, Paste in Tracker (mstsc) | Pass (Kevin): one file into `Remote files/<date time>/`, then pasted in Tracker |
+| Files, Tracker to Windows Explorer (mstsc) | Pass (Kevin): one file; Explorer asked for the file list 20 times and the contents once |
+| Resizing the mstsc window | Pass (Kevin): "display control: the client's window is now 1920x1080"; the display stays at 1920×1200, the only mode the driver offers |
+| Many files, folders, or large files with mstsc | **Not tested** |
 
 Review of the dynamic channels found two more problems, both fixed with
 tests: a message of 1,591 to 1,593 bytes read past its buffer, and under

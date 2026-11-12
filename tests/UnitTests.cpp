@@ -967,6 +967,27 @@ TestClipboardFiles()
 			&& clipboard.notices.back().find("limit") != std::string::npos);
 	}
 
+	// With file transfer off, files are neither advertised nor fetched.
+	{
+		// CLIPRDR_CAPS: header (8), count and pad (4), type and length (4),
+		// version (4), then generalFlags at byte 20.
+		ClipboardChannel withFiles(sender, clipboard, 1024 * 1024, true);
+		sender.sent.clear();
+		withFiles.Start();
+		CHECK(!sender.sent.empty() && sender.sent[0].size() == 24
+			&& (sender.sent[0][20] & CB_STREAM_FILECLIP_ENABLED) != 0);
+		ClipboardChannel noFiles(sender, clipboard, 1024 * 1024, false);
+		sender.sent.clear();
+		noFiles.Start();
+		CHECK(!sender.sent.empty() && sender.sent[0].size() == 24
+			&& (sender.sent[0][20] & CB_STREAM_FILECLIP_ENABLED) == 0);
+		noFiles.Receive(ClipPdu(CB_CLIP_CAPS, 0, caps.Data()));
+		sender.sent.clear();
+		noFiles.Receive(ClipPdu(CB_FORMAT_LIST, 0, formats.Data()));
+		CHECK(sender.sent.size() == 1
+			&& PduType(sender.sent[0]) == CB_FORMAT_LIST_RESPONSE);
+	}
+
 	std::string command = "rm -rf '" + root + "'";
 	CHECK(system(command.c_str()) == 0);
 }

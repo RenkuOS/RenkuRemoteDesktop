@@ -46,6 +46,8 @@ struct ServerConfig {
 	std::string	logLevel;
 	// Copies of files from the client larger than this are refused.
 	uint32_t	incomingFilesLimitMB;
+	// Files can be copied and pasted between the client and this computer.
+	bool		fileTransfer;
 	int			frameIntervalMs;
 	uint16_t	port;
 	std::string	bindAddress;

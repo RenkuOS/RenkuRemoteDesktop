@@ -74,6 +74,7 @@ ServerConfig::ServerConfig()
 	allowWithoutPassword(false),
 	resize(RESIZE_FASTEST),
 	incomingFilesLimitMB(500),
+	fileTransfer(true),
 	frameIntervalMs(40),
 	port(3389)
 {
@@ -115,7 +116,8 @@ Session::Session(int fd, const ServerConfig& config, TlsContext& tls,
 	fPointerGeneration(kNoPointer),
 	fClipboardSender(*this),
 	fClipboardChannel(fClipboardSender, clipboard,
-		(uint64_t)config.incomingFilesLimitMB * 1024 * 1024),
+		(uint64_t)config.incomingFilesLimitMB * 1024 * 1024,
+		config.fileTransfer),
 	fDynamicSender(*this),
 	fDynamicChannels(fDynamicSender),
 	fDisplayControl(*this),
@@ -798,7 +800,7 @@ Session::_HandleSlowPath(Pdu& pdu)
 
 	uint8_t choice = reader.U8() >> 2;
 	if (choice == MCS_DISCONNECT_PROVIDER_ULTIMATUM) {
-		LOG_I("client disconnected");
+		LOG_I("%s disconnected", Peer().c_str());
 		return false;
 	}
 	if (choice != MCS_SEND_DATA_REQUEST) {
@@ -929,7 +931,7 @@ Session::_HandleShareData(Reader& reader)
 		}
 
 		case PDUTYPE2_SHUTDOWN_REQUEST:
-			LOG_I("client asked to disconnect");
+			LOG_I("%s asked to disconnect", Peer().c_str());
 			return false;
 
 		case PDUTYPE2_BITMAPCACHE_PERSISTENT_LIST:

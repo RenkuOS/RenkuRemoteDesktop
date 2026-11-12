@@ -144,7 +144,8 @@ public:
 							// incomingLimit bytes are refused.
 							ClipboardChannel(ChannelSender& sender,
 								Clipboard& clipboard,
-								uint64_t incomingLimit);
+								uint64_t incomingLimit,
+								bool allowFiles = true);
 							~ClipboardChannel();
 
 			// The server's side of the Initialization Sequence (1.3.2.1).
@@ -174,6 +175,9 @@ private:
 			bool			_HandleFileContentsResponse(uint16_t flags,
 								const uint8_t* data, size_t size);
 
+			// Files go both ways only when allowed and the platform can
+			// stage them.
+			bool			_FilesEnabled();
 			bool			_StartDownload(
 								const std::vector<ClipboardFile>& files);
 			bool			_RequestNextPiece();
@@ -183,6 +187,7 @@ private:
 			ChannelSender&	fSender;
 			Clipboard&		fClipboard;
 			uint64_t		fIncomingLimit;
+			bool			fAllowFiles;
 			bool			fStarted;
 			bool			fLongNames;
 			bool			fClientFiles;

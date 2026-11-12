@@ -51,6 +51,7 @@ private:
 			BMenuField*			fAddressField;
 			BPopUpMenu*			fResizeMenu;
 			BMenuField*			fResizeField;
+			BCheckBox*			fFileTransfer;
 			BTextView*			fFingerprint;
 			BButton*			fDefaults;
 			BButton*			fRevert;
