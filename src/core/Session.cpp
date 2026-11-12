@@ -6,6 +6,7 @@
 
 #include "Session.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -604,13 +605,28 @@ Session::_ChooseSize()
 	DisplaySize console = fFrames.Size();
 	DisplaySize client = { fClient.desktopWidth, fClient.desktopHeight };
 	DisplaySize target;
-	if (ChooseSessionSize(fConfig.resize, client, console,
-			fFrames.AvailableSizes(), target)) {
+	std::vector<DisplaySize> available = fFrames.AvailableSizes();
+	if (ChooseSessionSize(fConfig.resize, client, console, available,
+			target)) {
 		LOG_I("switching the display from %dx%d to %dx%d (%s)",
 			console.width, console.height, target.width, target.height,
 			ResizePolicyName(fConfig.resize));
 		if (!fFrames.SetSize(target))
 			LOG_W("display mode switch failed");
+	} else if (client.width != console.width
+		|| client.height != console.height) {
+		// Say why, since the client's window then does not fit.
+		std::string sizes;
+		for (size_t i = 0; i < available.size(); i++) {
+			char text[32];
+			snprintf(text, sizeof(text), "%s%dx%d", i > 0 ? ", " : "",
+				available[i].width, available[i].height);
+			sizes += text;
+		}
+		LOG_I("keeping the display at %dx%d for a %dx%d client (%s); "
+			"display modes: %s", console.width, console.height,
+			client.width, client.height, ResizePolicyName(fConfig.resize),
+			sizes.empty() ? "none reported" : sizes.c_str());
 	}
 	fSize = fFrames.Size();
 }
